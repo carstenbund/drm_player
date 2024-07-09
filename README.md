@@ -8,8 +8,14 @@ compile with:
 python bindings in drm_display.py
 
 to use 
-'''import DRMdisplay
+'''
+import DRMdisplay
+'''
 initialize a display
-'''display = DRMDisplay('/dev/dri/card0')
+'''
+display = DRMDisplay('/dev/dri/card0')
+'''
 
-'''display.send_full_image(img)
+'''
+display.send_full_image(img)
+'''
