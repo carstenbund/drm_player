@@ -24,4 +24,4 @@ display = DRMDisplay('/dev/dri/card0')
 
 ```
 display.send_full_image(img)
-```python
+```
