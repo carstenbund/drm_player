@@ -8,67 +8,8 @@ import threading
 from functools import wraps
 from evdev import InputDevice, categorize, ecodes
 from selectors import DefaultSelector, EVENT_READ
-import configparser
+from config import ConfigLoader
 from drm_display import DRMDisplay
-
-class GenerativeBase(object):
-    def _generate(self):
-        s = self.__class__.__new__(self.__class__)
-        s.__dict__ = self.__dict__.copy()
-        return s
-
-def _generative(func):
-    @wraps(func)
-    def decorator(self, *args, **kw):
-        new_self = self._generate()
-        func(new_self, *args, **kw)
-        return new_self
-    return decorator
-
-class Config(GenerativeBase):
-    def __init__(self):
-        self.data = {}
-    def set(self, key, value):
-        self.data[key] = value
-    def get(self, key):
-        return self.data[key]
-    def __repr__(self):
-        return repr(self.data)
-    def __iter__(self):
-        return iter(self.data)
-    def __call__(self, key='name'):
-        return self.get(key)
-    def copy(self):
-        clone = self._generate()
-        return clone
-    def save(self, filename=None):
-        if filename is not None:
-            fn = filename
-        else:
-            fn = 'pdata/config.ini'
-        with open(fn, 'a') as sf:
-            sf.write('[{name}]\n'.format(name=self.data['name']))
-            for key, value in self.data.items():
-                value = str(value).replace(' ', '_')
-                sf.write('{key} = {value}\n'.format(key=key, value=value))
-            sf.write('\n')
-
-class config(Config):
-    def __init__(self, filename='config.ini'):
-        Config.__init__(self)
-        self.load_config(filename)
-
-    def load_config(self, filename):
-        parser = configparser.ConfigParser()
-        parser.read(filename)
-        if 'ImagePlayer' in parser:
-            for key in parser['ImagePlayer']:
-                value = parser['ImagePlayer'][key]
-                if value.isdigit():
-                    value = int(value)
-                elif value.lower() in ['true', 'false']:
-                    value = parser.getboolean('ImagePlayer', key)
-                self.set(key, value)
 
 class Canvas(object):
     def __init__(self, cf=None):
@@ -126,36 +67,27 @@ class DRMScreen(object):
     def show(self, canvas):
         self.display.send_full_image(canvas)
 
-def xblend_images(img1, img2, alpha):
-    blended_img = cv2.addWeighted(img1[:, :, :3], 1 - alpha, img2[:, :, :3], alpha, 0)
-    return cv2.cvtColor(blended_img, cv2.COLOR_RGB2RGBA)
-
 def blend_images(img1, img2, alpha):
     return cv2.addWeighted(img1, 1 - alpha, img2, alpha, 0)
 
-def load_images_from_directory(directory):
+def load_image(img_path, resize_dims=None):
+    img = cv2.imread(img_path)
+    if resize_dims:
+        img = cv2.resize(img, (resize_dims), interpolation=cv2.INTER_LANCZOS4)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)  # Convert to 4 channels (BGRA)
+    return np.array(img)
+
+def get_image_paths_from_directory(directory):
     supported_formats = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif')
-    images = []
-    for filename in sorted(os.listdir(directory)):
-        if filename.lower().endswith(supported_formats):
-            img_path = os.path.join(directory, filename)
-            img = cv2.imread(img_path)
-            if img is not None:
-                images.append(img)
-    return images
+    image_paths = [os.path.join(directory, filename) for filename in sorted(os.listdir(directory))
+                   if filename.lower().endswith(supported_formats)]
+    return image_paths
 
-def cache_prepared_images(canvas, images):
-    cached_images = []
-    for img in images:
-        canvas.prepare_image(img)
-        cached_images.append(canvas.canvas.copy())
-    return cached_images
-
-def play_images(screen, cached_images, delay=1, blend_frames=10, stop_event=None):
+def play_images(screen, image_paths, resize=(1024,600), delay=1, blend_frames=10, stop_event=None):
     while not stop_event.is_set():
-        for i in range(len(cached_images)):
-            current_img = cached_images[i]
-            next_img = cached_images[(i + 1) % len(cached_images)]
+        for i in range(len(image_paths)):
+            current_img = load_image(image_paths[i], resize_dims)
+            next_img = load_image(image_paths[(i + 1) % len(image_paths)], resize_dims)
             for alpha in np.linspace(0, 1, blend_frames):
                 start_time = time.perf_counter()
                 blended_img = blend_images(current_img, next_img, alpha)
@@ -165,20 +97,6 @@ def play_images(screen, cached_images, delay=1, blend_frames=10, stop_event=None
                 if sleep_time > 0:
                     if stop_event.wait(sleep_time):
                         return
-            screen.show(next_img)
-            if stop_event.wait(delay):
-                return
-
-def xplay_images(screen, cached_images, delay=1, blend_frames=10, stop_event=None):
-    while not stop_event.is_set():
-        for i in range(len(cached_images)):
-            current_img = cached_images[i]
-            next_img = cached_images[(i + 1) % len(cached_images)]
-            for alpha in np.linspace(0, 1, blend_frames):
-                blended_img = blend_images(current_img, next_img, alpha)
-                screen.show(blended_img)
-                if stop_event.wait(delay / blend_frames):
-                    return
             screen.show(next_img)
             if stop_event.wait(delay):
                 return
@@ -235,20 +153,22 @@ class KeyboardThread(threading.Thread):
 # usage
 
 if __name__ == "__main__":
-    config = config('config.ini')
-    drm_screen = DRMScreen("/dev/dri/card1")
+    config = ConfigLoader('config.ini')
+    cfg = config('ImagePlayer')
+    drm_screen = DRMScreen("/dev/dri/card0")
     drm_screen.clear()
 
-    image_directory = config.get('image_directory')
-    images = load_images_from_directory(image_directory)
+    image_directory = cfg.get('image_directory')
+    #images = load_from_directory(image_directory, (cfg('screen_width'), cfg('screen_height')) )
+    (screen_width, screen_height) = (cfg('screen_width'), cfg('screen_height'))
+    resize_dims = (screen_width, screen_height)
+    image_paths = get_image_paths_from_directory(cfg('image_directory'))
 
-    if images:
-        canvas = Canvas(config)
-        cached_images = cache_prepared_images(canvas, images)
+    if image_paths:
 
         stop_event = threading.Event()
 
-        player_thread = threading.Thread(target=play_images, args=(drm_screen, cached_images, config.get('delay'), config.get('blend_frames'), stop_event))
+        player_thread = threading.Thread(target=play_images, args=(drm_screen, image_paths, resize_dims, cfg.get('delay'), cfg.get('blend_frames'), stop_event))
         player_thread.start()
 
         keyboard_thread = KeyboardThread([player_thread], stop_event)
